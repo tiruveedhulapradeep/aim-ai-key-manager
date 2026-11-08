@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Access key manager</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101318; --panel:#191e26; --line:#2a313c; --text:#edf1f7; --muted:#9ba7b7; --accent:#8b7bff; --danger:#ff777e; --ok:#62d5a4; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:15px system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { width:min(760px,100%); margin:0 auto; padding:24px 16px 48px; }
+    h1 { font-size:24px; margin:4px 0 6px; } h2 { font-size:17px; margin:0 0 14px; }
+    p { color:var(--muted); margin:0 0 16px; line-height:1.45; }
+    .panel,.key { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; margin-top:16px; }
+    label { display:block; color:var(--muted); font-size:13px; margin:12px 0 6px; }
+    input { width:100%; border:1px solid var(--line); border-radius:10px; background:#11161d; color:var(--text); padding:12px; font:inherit; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    button { border:0; border-radius:10px; padding:11px 14px; background:var(--accent); color:#fff; font-weight:650; font-size:14px; margin-top:14px; }
+    button.secondary { background:#303746; } button.danger { background:#632b34; } button.small { padding:8px 10px; margin:8px 6px 0 0; font-size:12px; }
+    .top { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .muted { color:var(--muted); font-size:13px; } .status { min-height:20px; margin-top:10px; color:var(--muted); font-size:13px; }
+    .error { color:var(--danger); } .success { color:var(--ok); }
+    .key-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+    .key-name { font-weight:700; font-size:16px; } .code { color:#c7c1ff; font-family:ui-monospace,Consolas,monospace; margin-top:5px; }
+    .device { border-top:1px solid var(--line); padding-top:10px; margin-top:10px; }
+    .once { overflow-wrap:anywhere; color:var(--ok); background:#10251e; border-radius:10px; padding:12px; margin-top:12px; font-family:ui-monospace,Consolas,monospace; user-select:text; }
+    .hidden { display:none !important; }
+    @media(max-width:520px) { .grid { grid-template-columns:1fr; gap:0; } main { padding-top:16px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Access keys</h1>
+  <p>Admin access is limited to the configured account. New keys default to 30 days and one device; you can choose different limits for each key.</p>
+  <section id="login" class="panel">
+    <h2>Admin sign-in</h2>
+    <label for="email">Email</label><input id="email" type="email" autocomplete="username" value="pradeepinandhra@gmail.com" readonly>
+    <label for="password">Password</label><input id="password" type="password" autocomplete="current-password">
+    <button id="loginButton">Sign in</button>
+    <div id="loginStatus" class="status"></div>
+  </section>
+
+  <section id="manager" class="hidden">
+    <div class="top panel">
+      <div><h2>Manage licenses</h2><div id="signedIn" class="muted"></div></div>
+      <button id="logoutButton" class="secondary">Sign out</button>
+    </div>
+    <section class="panel">
+      <h2>Create a key</h2>
+      <label for="label">Label (optional)</label><input id="label" maxlength="120" placeholder="Customer or plan name">
+      <div class="grid">
+        <div><label for="expiry">Expires on (leave blank for no expiry)</label><input id="expiry" type="date"></div>
+        <div><label for="devices">Device limit</label><input id="devices" type="number" min="1" max="100" value="1"></div>
+      </div>
+      <button id="createButton">Create key</button>
+      <div id="newKey" class="once hidden"></div>
+      <div id="createStatus" class="status"></div>
+    </section>
+    <section class="panel"><div class="top"><h2>Existing keys</h2><button id="refreshButton" class="secondary">Refresh</button></div><div id="keys"></div><div id="listStatus" class="status"></div></section>
+  </section>
+</main>
+<script>
+  const PROJECT_URL = "https://exzrrkabazgupooymdig.supabase.co";
+  const PUBLISHABLE_KEY = "sb_publishable_hphz2X19giBUKd_aK19hWQ_xJzeSfrX";
+  const ADMIN_EMAIL = "pradeepinandhra@gmail.com";
+  const sessionKey = "aimAccessAdminSession";
+  const byId = (id) => document.getElementById(id);
+  let session = null;
+
+  function status(id, message, kind="") { const node=byId(id); node.textContent=message||""; node.className=`status ${kind}`; }
+  function safe(value) { const node=document.createElement("span"); node.textContent=value??""; return node.innerHTML; }
+  function formattedDate(value) { if(!value) return "No expiry"; const date=new Date(value); return Number.isNaN(date.getTime())?"Invalid date":date.toLocaleDateString(); }
+  function defaultExpiry() { const date=new Date(); date.setDate(date.getDate()+30); byId("expiry").value=date.toISOString().slice(0,10); }
+  async function request(path, body, authenticated=true) {
+    const headers={"apikey":PUBLISHABLE_KEY,"Content-Type":"application/json"};
+    if(authenticated) headers.Authorization=`Bearer ${session.access_token}`;
+    const response=await fetch(`${PROJECT_URL}${path}`,{method:"POST",headers,body:JSON.stringify(body)});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok) throw new Error(data?.error?.message||data?.msg||`Request failed (${response.status})`);
+    return data;
+  }
+  function saveSession(value) { session=value; localStorage.setItem(sessionKey,JSON.stringify(value)); }
+  function clearSession() { session=null; localStorage.removeItem(sessionKey); byId("manager").classList.add("hidden"); byId("login").classList.remove("hidden"); }
+  async function signIn() {
+    status("loginStatus","Signing in…");
+    try {
+      const response=await fetch(`${PROJECT_URL}/auth/v1/token?grant_type=password`,{
+        method:"POST",headers:{"apikey":PUBLISHABLE_KEY,"Content-Type":"application/json"},
+        body:JSON.stringify({email:ADMIN_EMAIL,password:byId("password").value})
+      });
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok) throw new Error(data?.msg||data?.message||"Sign-in failed. Check your password and Supabase Auth setup.");
+      if((data.user?.email||"").toLowerCase()!==ADMIN_EMAIL) throw new Error("This account is not the configured admin.");
+      data.expires_at=data.expires_at||Math.floor(Date.now()/1000)+(data.expires_in||3600);
+      saveSession(data); byId("password").value=""; showManager();
+    } catch(error) { status("loginStatus",error.message,"error"); }
+  }
+  async function restoreSession() {
+    try {
+      const saved=JSON.parse(localStorage.getItem(sessionKey)||"null");
+      if(!saved?.access_token) return;
+      if(Number(saved.expires_at)*1000<Date.now()+60000 && saved.refresh_token) {
+        const response=await fetch(`${PROJECT_URL}/auth/v1/token?grant_type=refresh_token`,{
+          method:"POST",headers:{"apikey":PUBLISHABLE_KEY,"Content-Type":"application/json"},
+          body:JSON.stringify({refresh_token:saved.refresh_token})
+        });
+        const renewed=await response.json(); if(!response.ok) throw new Error("Session expired");
+        renewed.expires_at=renewed.expires_at||Math.floor(Date.now()/1000)+(renewed.expires_in||3600); saveSession(renewed);
+      } else session=saved;
+      const response=await fetch(`${PROJECT_URL}/auth/v1/user`,{headers:{"apikey":PUBLISHABLE_KEY,Authorization:`Bearer ${session.access_token}`}});
+      const user=await response.json();
+      if(!response.ok||(user.email||"").toLowerCase()!==ADMIN_EMAIL) throw new Error("Admin session is invalid");
+      showManager();
+    } catch(_) { clearSession(); }
+  }
+  function showManager() {
+    byId("login").classList.add("hidden"); byId("manager").classList.remove("hidden");
+    byId("signedIn").textContent=`Signed in as ${ADMIN_EMAIL}`; defaultExpiry(); loadKeys();
+  }
+  async function adminAction(body) { return await request("/functions/v1/aim-access-admin",body,true); }
+  async function loadKeys() {
+    status("listStatus","Loading keys…");
+    try {
+      const result=await adminAction({action:"list"});
+      const container=byId("keys"); container.innerHTML="";
+      for(const key of result.keys||[]) container.appendChild(renderKey(key));
+      if(!container.children.length) container.innerHTML='<p class="muted">No access keys yet.</p>';
+      status("listStatus","");
+    } catch(error) { status("listStatus",error.message,"error"); if(/sign-in|admin/i.test(error.message)) clearSession(); }
+  }
+  function renderKey(key) {
+    const card=document.createElement("article"); card.className="key";
+    const heading=document.createElement("div"); heading.className="key-head";
+    const title=document.createElement("div"); title.innerHTML=`<div class="key-name">${safe(key.label||"Access key")}</div><div class="code">${safe(key.masked_key)}</div>`;
+    const state=document.createElement("div"); state.className=key.active?"success":"error"; state.textContent=key.active?"Active":"Revoked";
+    heading.append(title,state); card.append(heading);
+    const info=document.createElement("p"); info.className="muted"; info.textContent=`Expires: ${formattedDate(key.expires_at)} · Devices: ${key.devices.length}/${key.max_devices} · Created: ${formattedDate(key.created_at)}`; card.append(info);
+    const edit=document.createElement("div"); edit.className="grid";
+    const date=document.createElement("input"); date.type="date"; date.value=key.expires_at?new Date(key.expires_at).toISOString().slice(0,10):""; date.setAttribute("aria-label","Expiry date");
+    const cap=document.createElement("input"); cap.type="number"; cap.min="1"; cap.max="100"; cap.value=key.max_devices; cap.setAttribute("aria-label","Device limit");
+    edit.append(date,cap); card.append(edit);
+    const save=document.createElement("button"); save.className="small"; save.textContent="Save limits"; save.onclick=async()=>{
+      try { await adminAction({action:"update",id:key.id,expiresAt:date.value?`${date.value}T23:59:59.000Z`:null,maxDevices:Number(cap.value)}); await loadKeys(); }
+      catch(error) { alert(error.message); }
+    }; card.append(save);
+    const toggle=document.createElement("button"); toggle.className=`small ${key.active?"danger":"secondary"}`; toggle.textContent=key.active?"Revoke":"Enable"; toggle.onclick=async()=>{
+      try { await adminAction({action:"set_active",id:key.id,active:!key.active}); await loadKeys(); }
+      catch(error) { alert(error.message); }
+    }; card.append(toggle);
+    for(const device of key.devices||[]) {
+      const row=document.createElement("div"); row.className="device";
+      const text=document.createElement("span"); text.className="muted"; text.textContent=`Device •${device.suffix} · Last used ${formattedDate(device.lastSeenAt)}`;
+      const reset=document.createElement("button"); reset.className="small danger"; reset.textContent="Reset device"; reset.onclick=async()=>{
+        if(!confirm(`Reset device •${device.suffix}? The device will need to activate the key again.`)) return;
+        try { await adminAction({action:"reset_device",keyId:key.id,deviceId:device.id}); await loadKeys(); }
+        catch(error) { alert(error.message); }
+      };
+      row.append(text,reset); card.append(row);
+    }
+    return card;
+  }
+  async function createKey() {
+    status("createStatus","Creating key…"); byId("newKey").classList.add("hidden");
+    try {
+      const result=await adminAction({action:"create",label:byId("label").value,expiresAt:byId("expiry").value?`${byId("expiry").value}T23:59:59.000Z`:null,maxDevices:Number(byId("devices").value)});
+      const key=result.key.license; const panel=byId("newKey"); panel.textContent=`New key (copy it now): ${key}`; panel.classList.remove("hidden");
+      byId("label").value=""; defaultExpiry(); byId("devices").value="1"; status("createStatus","Key created. The full key is shown only once.","success"); await loadKeys();
+    } catch(error) { status("createStatus",error.message,"error"); }
+  }
+  byId("loginButton").addEventListener("click",signIn);
+  byId("password").addEventListener("keydown",event=>{if(event.key==="Enter")signIn();});
+  byId("createButton").addEventListener("click",createKey);
+  byId("refreshButton").addEventListener("click",loadKeys);
+  byId("logoutButton").addEventListener("click",clearSession);
+  defaultExpiry(); restoreSession();
+</script>
+</body>
+</html>
